@@ -24,3 +24,6 @@ venv/
 
 % Ignore local IDE settings
 .vscode/
+
+# Ignore local working folder
+local/
