@@ -1,0 +1,51 @@
+% !TeX encoding = UTF-8
+% !TeX program = xelatex
+% !TeX spellcheck = en_US
+
+\documentclass[degree=master,degree-type=professional,openany,oneside]{ustcthesis}
+% degree      = doctor | master | bachelor
+% degree-type = academic | professional
+% language    = chinese | english
+% fontset     = windows | mac | ubuntu | fandol
+
+% 加载宏包、全部的配置
+\input{ustcsetup.tex}
+
+
+\begin{document}
+
+\maketitle 
+\copyrightpage
+
+\cleardoublepage
+\frontmatter
+\input{chapters/new/abstract.tex}
+
+\cleardoublepage
+\tableofcontents
+
+\cleardoublepage
+% \input{chapters/new/notation.tex}
+
+\mainmatter
+\input{chapters/new/intro.tex}
+\input{chapters/new/tech.tex}
+\input{chapters/new/requirements.tex}
+\input{chapters/new/overview.tex}
+\input{chapters/new/design.tex}
+\input{chapters/new/testing.tex}
+\input{chapters/new/conclusion.tex}
+
+
+\nocite{*}
+\bibliography{bib/ustc}  % 参考文献使用 BibTeX 编译
+% \printbibliography       % 参考文献使用 BibLaTeX 编译
+
+% \appendix
+% \input{chapters/new/complementary.tex}
+
+\backmatter
+\input{chapters/new/acknowledgements.tex}
+\input{chapters/new/achievements.tex}
+
+\end{document}
