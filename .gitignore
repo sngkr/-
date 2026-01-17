@@ -27,3 +27,5 @@ venv/
 
 # Ignore local working folder
 local/
+
+*.xdv
