@@ -30,6 +30,31 @@
 % 定理类环境宏包
 \usepackage{amsthm}
 
+% 列表环境增强
+\usepackage{enumitem}
+
+% 多行注释环境
+\usepackage{verbatim}
+
+% PlantUML 全自动集成
+\usepackage{plantuml}
+
+% 兼容性修复：由于 plantuml 宏包 v0.5.0+ 默认仅支持 lualatex，
+% 针对 xelatex 手动定义环境以支持自动编译
+\usepackage{ifxetex}
+\ifxetex
+  \renewenvironment{plantuml}{%
+    \VerbatimOut{\jobname-plantuml.puml}%
+  }{%
+    \endVerbatimOut%
+    % 使用 -tlatex:nopreamble 只生成 TikZ 代码，使用 -charset UTF-8 支持中文
+    \immediate\write18{java -jar D:/plantuml.jar -charset UTF-8 \jobname-plantuml.puml -tlatex:nopreamble}%
+    \begin{adjustbox}{max width=\linewidth}%
+      \input{\jobname-plantuml.tex}%
+    \end{adjustbox}%
+  }
+\fi
+
 % 插图
 \usepackage{graphicx}
 
