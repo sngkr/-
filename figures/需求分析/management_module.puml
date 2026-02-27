@@ -1,0 +1,54 @@
+@startuml
+title 管理模块架构设计
+
+' 基础样式设置（替代 !theme plain）
+skinparam backgroundColor white
+skinparam roundcorner 10
+skinparam shadowing false
+' 自动选择系统自带的中文字体，防止乱码
+skinparam DefaultFontName "Microsoft YaHei", "SimSun", "sans-serif"
+
+' 颜色定义（去掉了 # 号在变量名中的干扰）
+!define COLOR_USER #E3F2FD
+!define COLOR_ROLE #FFF9C4
+!define COLOR_PERM #E8F5E9
+!define COLOR_RES #FCE4EC
+!define COLOR_SYS #F5F5F5
+
+skinparam usecase {
+    BorderColor #444444
+}
+
+rectangle "身份与访问控制" as Auth {
+    usecase "用户管理" as User COLOR_USER
+    usecase "用户组" as Group COLOR_USER
+    usecase "角色" as Role COLOR_ROLE
+    usecase "权限" as Perm COLOR_PERM
+}
+
+rectangle "资源与执行" as Asset {
+    usecase "资源管理" as Res COLOR_RES
+    usecase "项目/命名空间" as Project COLOR_RES
+}
+
+rectangle "运维支撑" as Admin {
+    usecase "系统管理" as Sys COLOR_SYS
+}
+
+' 关系连接
+User -down-> Group : 属于
+User -down-> Role : 分配
+Group -down-> Role : 分配
+Role -right-> Perm : 授权
+Perm -down-> Res : 作用于
+Res -right-> Project : 归属
+
+Sys .up.> User : 行为审计
+Sys .up.> Res : 变更审计
+
+note right of Perm
+  权限定义:
+  (资源类型, 操作, 范围)
+end note
+
+@enduml

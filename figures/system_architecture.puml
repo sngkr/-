@@ -1,0 +1,60 @@
+@startuml
+' 移除了老版本不支持的 !theme toy
+title "System Architecture"
+
+' 手动模拟清新风格
+skinparam componentStyle rectangle
+skinparam backgroundColor #FFFFFF
+skinparam packageStyle rectangle
+skinparam shadowing false
+skinparam DefaultFontName "Microsoft YaHei", "SimSun", "sans-serif"
+
+package "Access & Gateway Layer (接入层)" #E1F5FE {
+    [Unified API Gateway\n(统一鉴权网关)] as Gateway
+    [Context-Aware Auth\n(上下文感知鉴权)] as Auth
+    [Universal Event Descriptor\n(变更事件归一化)] as Signals
+}
+
+package "Intelligent Orchestration Layer (编排层)" #FFF9C4 {
+    [Dynamic DAG Parser\n(动态DAG解析器)] as Parser
+    [MDDG Integrity Manager\n(依赖图谱管理器)] as MDDG
+    [Risk Entropy Scorer\n(风险分值评估引擎)] as Risk
+    [SAGA Transaction Coordinator\n(分布式事务协调)] as Coordinator
+}
+
+package "Distributed Execution Fabric (执行层)" #E8F5E9 {
+    [Runner Group (Code)\n(代码域执行集群)] as RunnerCode
+    [Runner Group (Config)\n(配置域执行集群)] as RunnerConfig
+    [Runner Group (Infra)\n(基建域执行集群)] as RunnerInfra
+    [Runner Group (Data)\n(数据域审计集群)] as RunnerData
+    [Sidecar Plugin Executor\n(插件隔离执行器)] as Plugins
+}
+
+package "Multi-Modal Data Base (持久化层)" #F3E5F5 {
+    database "MySQL\n(元数据/RBAC/审计)" as MySQL
+    database "Neo4j\n(MDDG依赖图谱)" as Neo4j
+    database "Prometheus\n(实时监控指标)" as Prom
+}
+
+' Interactions
+Gateway -down-> Auth : challenge
+Auth -down-> Signals : pass
+Signals -down-> Parser : trigger
+
+Parser -right-> MDDG : fetch dependencies
+MDDG -down-> Risk : predict impact
+Risk -left-> Coordinator : block/allow
+
+Coordinator -down-> RunnerCode : task dispatch
+Coordinator -down-> RunnerConfig : task dispatch
+Coordinator -down-> RunnerInfra : task dispatch
+Coordinator -down-> RunnerData : task dispatch
+
+RunnerCode -down-> Plugins : isolated exec
+RunnerConfig -down-> Plugins : isolated exec
+
+RunnerData .up.> Neo4j : topology update
+RunnerCode .up.> MySQL : audit record
+RunnerConfig .up.> Prom : metrics push
+
+@enduml

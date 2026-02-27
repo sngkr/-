@@ -42,21 +42,39 @@
 % 兼容性修复：由于 plantuml 宏包 v0.5.0+ 默认仅支持 lualatex，
 % 针对 xelatex 手动定义环境以支持自动编译
 \usepackage{ifxetex}
+
+% 计数器：确保每个 PlantUML 环境输出到独立文件
+\newcounter{plantumlidx}
+
 \ifxetex
   \renewenvironment{plantuml}{%
-    \VerbatimOut{\jobname-plantuml.puml}%
+    \stepcounter{plantumlidx}%
+    \VerbatimOut{\jobname-plantuml-\theplantumlidx.puml}%
   }{%
     \endVerbatimOut%
     % 使用 -tlatex:nopreamble 只生成 TikZ 代码，使用 -charset UTF-8 支持中文
-    \immediate\write18{java -jar D:/plantuml.jar -charset UTF-8 \jobname-plantuml.puml -tlatex:nopreamble}%
-    \begin{adjustbox}{max width=\linewidth}%
-      \input{\jobname-plantuml.tex}%
+    \immediate\write18{java -jar D:/plantuml.jar -charset UTF-8 \jobname-plantuml-\theplantumlidx.puml -tlatex:nopreamble}%
+    \begin{adjustbox}{max width=0.85\linewidth}%
+      \input{\jobname-plantuml-\theplantumlidx.tex}%
+    \end{adjustbox}%
+  }
+
+  \newenvironment{plantumlwide}{%
+    \stepcounter{plantumlidx}%
+    \VerbatimOut{\jobname-plantuml-\theplantumlidx.puml}%
+  }{%
+    \endVerbatimOut%
+    % 使用 -tlatex:nopreamble 只生成 TikZ 代码，使用 -charset UTF-8 支持中文
+    \immediate\write18{java -jar D:/plantuml.jar -charset UTF-8 \jobname-plantuml-\theplantumlidx.puml -tlatex:nopreamble}%
+    \begin{adjustbox}{max width=1.0\linewidth}%
+      \input{\jobname-plantuml-\theplantumlidx.tex}%
     \end{adjustbox}%
   }
 \fi
 
 % 插图
 \usepackage{graphicx}
+\usepackage{float}
 
 % 三线表
 \usepackage{booktabs}
@@ -66,6 +84,9 @@
 
 % 跨页表格
 \usepackage{longtable}
+
+% 弹性列宽表格
+\usepackage{tabularx}
 
 % 算法
 \usepackage[ruled,linesnumbered]{algorithm2e}

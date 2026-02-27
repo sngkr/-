@@ -1,90 +1,1167 @@
 % !TeX root = ../main.tex
 
-\chapter{持续交付系统总体架构（概要设计）与关键算法}
+
+\chapter{系统概要设计}
 \label{chap:overview}
 
-本章在前一章需求分析的基础上，从系统工程的视角出发，构建“面向多变更领域的持续交付系统”的总体架构方案与核心算法逻辑。针对多变更域环境下物理隔离与逻辑耦合并存的复杂现状，本章将详细阐述系统的逻辑分层架构、功能子系统详细设计以及支撑跨域协同的关键算法模型。作为连接需求与实现的桥垒，本章不仅解决了“如何构建系统”的工程架构问题，更通过科学的算法建模确保系统能够应对复杂业务场景下的交付稳定性与一致性挑战。
+本章在需求分析的基础上，对面向多变更领域的持续交付系统进行概要设计。系统设计遵循高内聚、低耦合的软件工程原则，采用模块化微服务架构，旨在构建一个稳定、高效、安全的自动化交付平台。本章将详细阐述系统的整体分层架构、拓扑部署形态、核心功能模块设计、数据库模型以及接口规范，为后续的详细设计与实现阶段提供指导。
 
-\section{总体架构设计}
+\section{系统整体设计}
 
-系统的总体设计旨在为异构且高并发的变更任务提供一个统一的编排与调度底座。
+系统整体设计确立了系统的宏观技术路线与物理形态，旨在保障系统在高并发变更场景下具备良好的性能、可靠性与安全性。
 
-\subsection{架构设计原则}
+\subsection{系统层次架构}
 
-在多变更领域交叉影响的背景下，本系统遵循以下核心设计原则：
+为了实现各功能模块的解耦与复用，系统采用分层架构模式。自下而上划分为物理基础设施层、数据存储层、核心服务层、业务编排层以及用户接入层。各层之间通过标准接口进行通信，上层依赖下层提供服务，下层对上层屏蔽实现细节。系统层次架构如图 \ref{fig:arch_layers_plain} 所示。
+
+\begin{figure}[H]
+    \centering
+    \begin{plantuml}
+@startuml
+skinparam componentStyle rectangle
+skinparam shadowing false
+skinparam defaultFontName "SimSun"
+
+package "用户接入层" {
+    [Web 控制台]
+    [命令行工具]
+}
+
+package "业务网关层" {
+    [统一接入网关]
+    [Webhook 接收器]
+    [OpenAPI 服务]
+}
+
+package "核心业务编排层" {
+    [变更感知服务]
+    [流水线编排引擎]
+    [检查插件中心]
+    [用户权限中心]
+}
+
+package "执行与调度层" {
+    [任务调度器]
+    [资源管理器]
+    [执行引擎]
+}
+
+package "数据存储与基础设施层" {
+    database "MySQL (业务数据)" 
+    database "Redis (缓存队列)"
+    database "MinIO (日志/产物)"
+    [K8s 计算集群]
+}
+
+[Web 控制台] --> [统一接入网关]
+[命令行工具 CLI] --> [OpenAPI 服务]
+[Webhook 接收器] --> [变更感知服务]
+
+[统一接入网关] --> [用户权限中心]
+[统一接入网关] --> [流水线编排引擎]
+
+[变更感知服务] --> [流水线编排引擎]
+[流水线编排引擎] --> [检查插件中心]
+[流水线编排引擎] --> [任务调度器]
+
+[任务调度器] --> [资源管理器]
+[资源管理器] --> [执行引擎]
+[执行引擎] -down-> [K8s 计算集群]
+
+[核心业务编排层] ..> [MySQL (业务数据)]
+[执行与调度层] ..> [Redis (缓存队列)]
+@enduml
+    \end{plantuml}
+    \caption{系统层次架构图}
+    \label{fig:arch_layers_plain}
+\end{figure}
+
+各层级的功能职责详细定义如下：
+
+用户接入层作为系统与各角色的交互窗口，提供可视化的 Web 控制台供研发、运维人员进行流水线编排、状态监控及报表查看，同时配备命令行工具（CLI）以支持在 CI 流程中的自动化调用与脚本集成。
+
+业务网关层作为流量的统一汇聚点，集成了 API 网关组件、Webhook 接收器及鉴权逻辑，负责对所有外部请求进行路由分发、TLS 终结、身份验证与请求治理。此外，该层还承担了流量配额控制的功能，通过令牌桶等算法保障后端服务的稳定性。
+
+核心业务编排层作为系统的业务逻辑中心，负责变更事件的标准化处理、流水线 DAG（有向无环图）的动态生成、插件能力的生命周期管理以及细粒度的权限校验。该层将复杂的交付流程抽象为一系列可执行的任务节点，并维护执行过程中的各种上下文状态。
+
+执行与调度层作为系统的动力执行单元，负责将抽象的任务逻辑转化为物理执行动作。任务调度器根据工作负载与节点亲和性，动态选择最优的计算节点。执行引擎则驱动具体的容器环境，加载插件镜像并挂载代码卷，完成构建、测试及部署动作。
+
+最后，数据存储与基础设施层为系统提供底层资源支撑。系统利用 MySQL 进行业务实体的关系化存储，Redis 用于缓存热点数据与存放执行计划队列，MinIO 负责持久化存储所有的构建日志与二进制包产物。同时，高性能的 Kubernetes 集群作为计算基石，通过容器化技术实现任务间的环境隔离。
+
+
+\subsection{系统拓扑结构}
+
+考虑到系统的高可用性与可扩展性，物理部署采用分布式集群拓扑。核心服务以微服务形式部署在 Kubernetes 集群中，支持水平自动伸缩。数据库与中间件采用主从高可用架构，确保数据不丢失、服务不中断。系统物理拓扑结构如图 \ref{fig:deploy_topo} 所示。
+
+\begin{figure}[htbp]
+    \centering
+    \begin{plantuml}
+@startuml
+skinparam nodeStyle rectangle
+skinparam shadowing false
+skinparam defaultFontName "SimSun"
+
+node "负载均衡器 (Nginx/SLB)" as LB
+
+package "Kubernetes 计算集群" {
+    node "Master 节点" {
+        [API Server]
+        [Scheduler]
+    }
+    
+    node "Worker 节点组 A (管理面)" {
+        [网关服务 Pod]
+        [编排服务 Pod]
+        [权限服务 Pod]
+    }
+    
+    node "Worker 节点组 B (执行面)" {
+        [Runner 容器 1]
+        [Runner 容器 2]
+        [Runner 容器 N]
+    }
+}
+
+package "数据存储集群" {
+    database "MySQL 主库" as DB_Master
+    database "MySQL 从库" as DB_Slave
+    database "Redis 集群" as Redis_Cluster
+}
+
+trigger_web --> LB : HTTP/HTTPS
+LB --> [网关服务 Pod]
+
+[编排服务 Pod] .down.> DB_Master : 读写
+[编排服务 Pod] .down.> DB_Slave : 只读
+[编排服务 Pod] .down.> Redis_Cluster : 缓存
+
+[Runner 容器 1] .[dashed].> [网关服务 Pod] : 上报状态
+@enduml
+    \end{plantuml}
+    \caption{系统物理拓扑结构图}
+    \label{fig:deploy_topo}
+\end{figure}
+
+\section{系统功能模块设计}
+
+基于需求分析中的功能划分，系统包含六个核心功能模块：用户与治理模块、多触发源感知模块、智能化流水线编排模块、执行引擎模块、反馈与观测模块以及开放平台模块。本节首先给出系统的功能结构设计，随后详细介绍各模块的设计细节。
+
+\subsection{系统功能结构设计}
+
+系统功能结构设计旨在从全局视角定义系统的能力版图，明确各功能领域及其子模块的层级关系。如图 \ref{fig:functional_structure} 所示，系统功能结构呈现出“底座先行、核心驱动、反馈闭环”的特征。
+
+\begin{figure}[htbp]
+    \centering
+    \begin{plantuml}
+@startuml
+skinparam componentStyle rectangle
+skinparam shadowing false
+skinparam defaultFontName "SimSun"
+
+package "持续交付系统功能版图" {
+    package "用户与治理模块" {
+        [身份认证]
+        [RBAC 权限管控]
+        [资源配额管理]
+    }
+    
+    package "触发源感知与处理模块" {
+        [变更监听]
+        [事件归一化]
+        [冲突预检]
+    }
+    
+    package "检查能力模块" {
+        [Pipeline中心]
+        [配置中心]
+        [能力拓展中心]
+    }
+    
+    package "引擎模块" {
+        [流水线编排]
+        [任务调度]
+        [算力执行]
+    }
+    
+    package "反馈模块" {
+        [实时反馈]
+        [消息持久化]
+    }
+    
+    package "开放平台" {
+        [OpenAPI 管理]
+        [Webhook 路由]
+    }
+}
+
+[用户与治理模块] -[hidden]down-> [触发源感知与处理模块]
+[触发源感知与处理模块] -down-> [检查能力模块]
+[检查能力模块] -down-> [引擎模块]
+[引擎模块] -down-> [反馈模块]
+[检查能力模块] -right-> [开放平台]
+@enduml
+    \end{plantuml}
+    \caption{系统功能模块结构图}
+    \label{fig:functional_structure}
+\end{figure}
+
+在该功能结构中，用户与治理模块作为安全底座，负载身份校验与精细化授权；触发源感知与处理模块负责将碎片化的变更信号转化为系统标准的任务触发请求；检查能力模块是业务逻辑的核心，由 Pipeline中心负责流程建模，配置中心维护环境变量与策略，能力拓展中心支撑插件化能力的按需加载；引擎模块则将抽象的编排逻辑转化为具体的计算任务并进行高效调度与执行；反馈模块通过实时反馈确保执行过程的一致性，并通过消息持久化保障审计与复盘的完备性。开放平台则为系统提供了良好的生态协同支撑。
+
+\subsection{用户与治理模块设计}
+
+该模块作为系统的安全底座，对应需求分析中的权限管理与资源治理需求。设计重点在于构建统一的身份标识与细粒度的资源访问控制体系。
+
+核心功能包括身份认证中心、权限管理引擎及资源配额管理组件。身份认证中心基于 OAuth 2.0 协议构建，支持多租户的账号体系，并在登录成功后采用非对称加密算法签发 JSON Web Token（JWT），实现无状态鉴权以应对微服务间的频繁调用。权限管理引擎深度实现了基于角色的访问控制模型（RBAC），允许管理员以角色为载体进行权限打包，并支持基于命名空间的权限隔离。资源配额管理组件则负责对集群资源进行逻辑分区，针对不同研发团队设置 CPU 核心数、内存带宽及并发任务数上限，通过硬配额限流机制防止非预期的资源争抢。
+
+当用户尝试访问受保护资源时，权限校验过程如图 \ref{fig:user_auth_act} 所示。用户通过浏览器或客户端发起登录请求，身份认证中心在验证凭证后签发 JWT。随后用户携带令牌发起业务操作，RBAC 引擎解析令牌并根据当前项目的权限策略进行判定，若校验通过则授权访问相关实体，否则将进行审计拦截。
+
+\begin{figure}[H]
+    \centering
+    \begin{plantuml}
+@startuml
+skinparam shadowing false
+skinparam defaultFontName "SimSun"
+
+|用户|
+start
+:发起登录请求;
+:携带访问令牌发起操作;
+
+|认证与鉴权中心|
+:验证用户凭证 (Username/PWD/OAuth);
+if (凭证是否合法?) then (否)
+    :返回认证失败异常;
+    stop
+else (是)
+    :签发令牌 (JWT);
+endif
+
+:提取令牌中的角色声明;
+:查询 RBAC 策略规则;
+if (是否具备操作权限?) then (否)
+    :返回 403 Forbidden 并记录审计日志;
+    stop
+else (是)
+    :下发资源访问权限;
+endif
+
+|业务系统|
+:执行具体的资源操作 (如增删改查);
+stop
+@enduml
+    \end{plantuml}
+    \caption{用户身份认证与鉴权活动图}
+    \label{fig:user_auth_act}
+\end{figure}
+
+为了实现上述精细化的权限管控，本模块采用了业界成熟的基于角色的访问控制模型，其逻辑架构如图 \ref{fig:rbac_class} 所示。在该模型中，用户与权限并不直接关联，而是通过角色作为中间桥梁。这种解耦设计极大地降低了权限维护的复杂度——管理员只需为运维角色、开发角色分别定义权限集，用户只需加入对应的角色即可自动继承所有操作权限，实现了权限的自动化与批量化发放。此外，系统通过资源标记（Resource Tagging）技术，支持了针对特定项目或流水线的实例级鉴权。
+
+\begin{figure}[H]
+    \centering
+    \begin{plantumlwide}
+@startuml
+left to right direction
+skinparam classAttributeIconSize 0
+skinparam shadowing false
+skinparam defaultFontName "SimSun"
+
+class User {
+    - userId: Long
+    - username: String
+    + login(): void
+}
+
+class Role {
+    - roleId: Long
+    - roleName: String
+    - code: String
+}
+
+class Permission {
+    - permId: Long
+    - resourceType: String
+    - action: String
+}
+
+class UserRole {
+    - userId: Long
+    - roleId: Long
+}
+
+class RolePerm {
+    - roleId: Long
+    - permId: Long
+}
+
+User "1" -- "0..*" UserRole
+UserRole "0..*" -- "1" Role
+Role "1" -- "0..*" RolePerm
+RolePerm "0..*" -- "1" Permission
+
+note right of Permission
+  resourceType: PIPELINE
+  action: EXECUTE
+end note
+@enduml
+    \end{plantumlwide}
+    \caption{RBAC 用户权限模型类图}
+    \label{fig:rbac_class}
+\end{figure}
+
+\subsection{多触发源感知模块设计}
+
+感知模块承担着监听变更与事件分发的职责，是整个持续交付流程的生命起点。为了应对多行业、多变更类型的复杂环境，设计采用了适配器设计模式，旨在将上游碎片化的变动转化为下游可理解的规约化数据。
+
+该模块通过热插拔式的适配器组件实现全生命周期的变更感知。代码变更感知器通过订阅 Git 服务的 Webhook 钩子，解析变更集（Changeset）中的元数据；数据库监控器则利用数据库审计接口或 Binlog 解析技术，捕捉表结构定义的变更脉络；配置探测器则针对主流配置中心，利用长轮询机制定时检测配置版本的漂移。所有捕获的原始信号最终被汇总至事件归一化处理引擎，在此处完成数据的清洗、去重与标准化，映射为符合 CloudEvents 标准的结构化事件。每个事件均包含变更指纹、操作时间线、风险等级评估及变更人索引，并投递至高性能异步事件总线中。
+
+
+
+由于触发源的异构性（如 Git Webhook 是 JSON 数据，Binlog 是二进制流），系统难以直接处理。为此，本模块引入了适配器模式来屏蔽这种差异，设计方案如图 \ref{fig:adapter_class} 所示。系统定义了统一的 \texttt{EventAdapter} 接口，要求所有适配器实现 \texttt{parse} 方法。\texttt{GitLabAdapter}、\texttt{DBAdapter} 等具体实现类负责将各自领域的原始载荷翻译成系统内部通用的 \texttt{CloudEvent} 对象。通过这种设计，当未来需要接入新的触发源（如 Jira 变更）时，只需增加一个新的适配器类，而无需修改核心网关代码，符合“开闭原则”。
+
+变更感知模块的动态处理流程如图 \ref{fig:trigger_sense_act} 所示。监听器持续捕获来自各个维度的变更脉络，随后分发给特定的适配器进行原始报文的提取与转义。经过内容预检与去重逻辑后，异构信号被封装为标准的云事件模型并投递至处理队列，驱动后端的流水线引擎进行后续生产逻辑。
+
+\begin{figure}[H]
+    \centering
+    \begin{plantuml}
+@startuml
+skinparam shadowing false
+skinparam defaultFontName "SimSun"
+
+|各触发源适配器|
+start
+:监听异步变更信号 (Webhook/MQ/AuditLog);
+:提取原始载荷元数据;
+
+|事件处理器|
+:根据源类型匹配特定的转义逻辑;
+:将报文转换为 CloudEvent 标准格式;
+:执行事件指纹去重校验;
+if (是否为重复执行事件?) then (是)
+    :丢弃当前消息;
+    stop
+else (否)
+    :进行变更分险初步评估;
+    :推送到核心事件总线;
+endif
+
+|流水线编排模块|
+:接收标准化事件并触发模型渲染;
+stop
+@enduml
+    \end{plantuml}
+    \caption{多触发源感知活动图}
+    \label{fig:trigger_sense_act}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \begin{plantuml}
+@startuml
+skinparam classAttributeIconSize 0
+skinparam shadowing false
+skinparam defaultFontName "SimSun"
+
+interface "EventAdapter" as Adapter {
+    + parse(raw: Object): CloudEvent
+}
+
+class "GitLabAdapter" as Git {
+    + parse(webhookJson: String): CloudEvent
+}
+
+class "DBMonitorAdapter" as DB {
+    + parse(binlogRow: byte[]): CloudEvent
+}
+
+class "CronSchedulerAdapter" as Cron {
+    + parse(jobContext: JobCtx): CloudEvent
+}
+
+class "EventBus" as Bus {
+    + publish(event: CloudEvent): void
+}
+
+Git .up.|> Adapter
+DB .up.|> Adapter
+Cron .up.|> Adapter
+
+Adapter ..> Bus : output
+@enduml
+    \end{plantuml}
+    \caption{多源事件适配器模式类图}
+    \label{fig:adapter_class}
+\end{figure}
+
+\subsection{智能化流水线编排模块设计}
+
+智能化编排模块是系统的逻辑中枢，对应需求分析中的自动化与插件化流水线编排需求。设计上采用声明式编排（Declarative Orchestration）与动态图渲染相结合的策略，旨在为用户提供低门槛、高弹性的建模能力。
+
+系统构建了基于插件化的编排体系。插件注册中心作为元数据中心，统一管理各类检查能力的镜像索引、输入参数校验规则及输出数据结构定义。流水线模板库则预置了多种典型交付场景的模型定义，并在内部通过有向无环图（DAG）描述阶段与任务间的时序依赖。当变更事件到达时，编排引擎通过启发式规则对模板进行动态剪枝或注入。例如，若变更被标记为涉及前端资源文件，引擎会自动识别并注入静态资源压缩与 CDN 预热插件，从而实现了针对特定变更领域的差异化编排逻辑。
+
+
+
+流水线往往具有复杂的层级结构，为了灵活描述这种树状关系，本模块采用了组合模式进行建模，其逻辑架构如图 \ref{fig:pipeline_composite} 所示。在设计中，流水线、阶段和任务均被抽象为组件实体，对外暴露统一的逻辑执行行为。这种递归的一致性设计，使得编排引擎能够以统一的接口处理不同复杂度的编排树，同时也为未来嵌套子流水线等扩展功能的实现提供了架构支持。
+
+流水线的动态编排与生成逻辑如图 \ref{fig:orchestration_act} 所示。引擎首先解析输入事件，匹配对应的流水线蓝图，随后基于变更特征（如涉及的文件后缀、所属架构组件等）执行动态渲染与剪枝。在初始化执行上下文后，编排引擎将任务全集拆解为可调度的原子节点，并向底层的执行引擎发出资源申请指令。
+
+\begin{figure}[H]
+    \centering
+    \begin{plantuml}
+@startuml
+skinparam shadowing false
+skinparam defaultFontName "SimSun"
+
+|编排引擎|
+start
+:从事件总线拉取变更信号;
+:查找关联的流水线定义模板;
+:解析领域规则并执行动态剪枝;
+:注入全局环境变量与插件参数;
+
+|插件中心|
+:加载所需插件的镜像索引与摘要;
+:验证插件输入的合规性;
+
+|执行与调度层|
+:初始化执行流程上下文;
+:将 DAG 节点映射为待调度任务;
+:向资源管理器申请计算配额;
+stop
+@enduml
+    \end{plantuml}
+    \caption{系统流水线编排活动图}
+    \label{fig:orchestration_act}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \begin{plantumlwide}
+@startuml
+left to right direction
+skinparam classAttributeIconSize 0
+skinparam shadowing false
+skinparam defaultFontName "SimSun"
+
+abstract class Component {
+    + execute(ctx: Context): void
+}
+
+class Pipeline {
+    - stages: List<Stage>
+    + execute(ctx: Context): void
+}
+
+class Stage {
+    - jobs: List<Job>
+    + execute(ctx: Context): void
+}
+
+class Job {
+    - plugin: Plugin
+    - params: Map
+    + execute(ctx: Context): void
+}
+
+class Plugin {
+    - image: String
+    - command: String
+}
+
+Pipeline --|> Component
+Stage --|> Component
+Job --|> Component
+
+Pipeline *-- "1..*" Stage
+Stage *-- "1..*" Job
+Job --> "1" Plugin
+@enduml
+    \end{plantumlwide}
+    \caption{流水线模型组合模式类图}
+    \label{fig:pipeline_composite}
+\end{figure}
+
+\subsection{执行引擎模块设计}
+
+执行引擎模块的核心职责是为流水线任务提供可靠、隔离的运行环境，对应需求分析中的基础设施管理与任务执行需求。设计重点在于环境的确定性与执行状态的实时搜集。
+
+在调度层面，系统引入了多队列优先级模型，根据变更的风险等级与环境属性（如生产、预发）动态调整调度权重，确保高优先级发布任务能够优先获取计算资源。执行代理作为轻量级的守护进程，被编排在容器化的运行环境中，负责镜像的本地缓存预拉取、代码卷的安全挂载。为了彻底消除由于环境残留引起的偶发故障，执行环境采用动态申请、随机生成、任务结束后即时销毁的机制。这种隔离技术利用容器底层的 Namespace 与 Cgroups 能力，确保每个任务都在纯净的虚拟化沙箱中运行，实现了资源利用率与安全性的平衡。
+
+
+
+图 \ref{fig:execution_seq} 展示了任务从资源申请到最终销毁的完整执行流程。当调度器在就绪队列中识别到待执行任务时，会向 Kubernetes 集群发起资源配额请求。待 Pod 成功拉起并处于活跃状态后，Runner 代理会建立反向连接并拉取具体的任务指令集。执行过程中，所有的标准输出流将被实时推送到日志聚合中心。任务一旦进入终态，系统会自动触发资源清理机制，释放集群容量，这种模式有效提升了系统的并发处理能力。
+
+\begin{figure}[H]
+    \centering
+    \begin{plantumlwide}
+@startuml
+skinparam shadowing false
+skinparam defaultFontName "SimSun"
+
+|调度器|
+start
+:选取高优先级任务;
+:向K8s集群发起资源配额请求;
+
+|K8s集群|
+:创建并拉起任务Pod;
+
+|执行代理|
+:初始化容器环境;
+:建立反向连接并拉取任务脚本;
+:解析并执行Shell/Python脚本;
+fork
+    :实时推送到日志聚合中心;
+fork again
+    :监控任务进程状态;
+end fork
+:上报执行结果(成功/失败);
+
+|调度器|
+:接收执行反馈数据;
+:发起资源释放指令;
+
+|K8s集群|
+:销毁Pod并回收算力资源;
+
+|调度器|
+stop
+@enduml
+    \end{plantumlwide}
+    \caption{任务执行调度活动图}
+    \label{fig:execution_seq}
+\end{figure}
+
+反馈与观测模块负责执行过程的数据搜集与多渠道触达，对应需求分析中的实时观测需求。系统的反馈体系主要由实时日志、质量度量与异步通知三个核心能力组成。
+
+日志服务采用侧车模式（Sidecar）实时采集执行容器的标准输出，并通过高性能采集链路传输至检索集群，支持用户在控制台实时查看任务进展。质量度量组件则对流水线执行频率、成功率、交付周期等效能指标进行维度聚合，为项目治理提供客观依据。异步通知组件集成了多种办公协同软件及传统邮件协议，根据执行结果模版化渲染差异化的消息卡片，确保关键异常信息能够第一时间推送到责任人。
+
+
+
+为了实现对海量并发执行节点的全方位观测，系统设计了基于分布式链路的采集架构，其数据流向如图 \ref{fig:observability_flow} 所示。在任务容器所在的运算 Pod 中，业务容器负责指令执行，而伴生采集容器则共享日志卷空间，实时读取日志轨迹并投递。硬件指标导出器负责同步采集计算节点的计算资源水位。这种解耦架构有效地隔离了业务逻辑与观测逻辑，避免了由于观测负载过高导致的任务执行延迟。最终，这些异构数据被注入到持久化搜索引擎与时序数据库中，形成完整的系统观测闭环。
+
+反馈与观测模块的业务处理活动如图 \ref{fig:feedback_act} 所示。在流水线执行的全生命周期内，系统不仅实时捕获容器内日志，还定期轮询 API Server 获取底层 Pod 状态。当识别到关键状态转换（如异常失败、超时熔断）时，系统会自动触发告警模板的匹配策略，并将结构化的反馈卡片推送到用户的协同终端。
+
+\begin{figure}[H]
+    \centering
+    \begin{plantuml}
+@startuml
+skinparam shadowing false
+skinparam defaultFontName "SimSun"
+
+|采集代理|
+start
+:轮询任务容器状态;
+:异步监听 Stdout/Stderr 日志流;
+:读取 Sidecar 模式生成的监控指标;
+
+|反馈处理器|
+:将原始数据归一化并打上任务指纹;
+:持久化存储以便事后追溯;
+if (检测到非正常状态?) then (是)
+    :根据配置匹配告警策略模块;
+    :渲染富文本通知卡片;
+    :推送到多渠道目标 (IM/Email/Slack);
+else (否)
+    :仅更新实时 Dashboard 进度;
+endif
+
+|用户|
+:实时查看执行进度与反馈报告;
+stop
+@enduml
+    \end{plantuml}
+    \caption{反馈与观测活动图}
+    \label{fig:feedback_act}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \begin{plantuml}
+@startuml
+skinparam componentStyle rectangle
+skinparam shadowing false
+skinparam defaultFontName "SimSun"
+
+package "执行节点 (Pod)" {
+    [Runner App]
+    [Filebeat Sidecar]
+    [Node Exporter]
+}
+
+queue "Kafka 消息队列" as Kafka
+
+database "Elasticsearch\n(日志存储)" as ES
+database "Prometheus\n(指标存储)" as Prom
+
+[Web Dashboard\n(Grafana)] as Dash
+
+[Runner App] -right-> [Filebeat Sidecar] : 输出日志文件
+[Filebeat Sidecar] -down-> Kafka : 推送日志流
+[Node Exporter] -down-> Prom : 拉取 CPU/Mem 指标
+
+Kafka -right-> ES : 消费建立索引
+ES -up-> Dash : 查询日志聚合
+Prom -up-> Dash : 查询监控图表
+
+@enduml
+    \end{plantuml}
+    \caption{反馈与观测系统数据流图}
+    \label{fig:observability_flow}
+\end{figure}
+
+开放平台模块旨在提升系统的连接能力与生态兼容性，对应需求分析中的对外接口与插件扩展需求。
+
+系统通过 OpenAPI 网关对外暴露标准化的接口协议，并内置了限流保护与熔断保护机制，以防止外部突发流量对内部核心编排引擎造成冲击。应用授权管理组件负责管理第三方系统的准入生命周期，支持基于凭证的私密授权模式。此外，系统还提供了完善的 Webhook 订阅转发机制，允许下游系统订阅流水线的状态变更事件（如成功、失败、开始等），实现了多系统间的闭环联动。
+
+
+
+作为对外开放的安全门户，API 网关的设计逻辑至关重要。图 \ref{fig:openapi_seq} 展示了外部系统请求时的逻辑校验流程。请求到达网关后，首先由流量控制器根据调用方身份判断其是否处于配额限制内；通过流量校验后，网关会请求安全中心校验数字签名的合法性与有效期。只有通过层层校验的受信任请求，才会被转发至后端的业务逻辑控制器进行处理。这种多重防护、统一出口的设计，确保了开放平台在提供灵活性的同时，不会成为系统的安全风险点。
+
+\begin{figure}[H]
+    \centering
+    \begin{plantumlwide}
+@startuml
+skinparam shadowing false
+skinparam defaultFontName "SimSun"
+
+|第三方系统|
+start
+:发起 API 调用请求;
+
+|API 网关|
+:流量控制器执行配额检测;
+if (是否超出限流阈值?) then (是)
+    :返回 429 Too Many Requests;
+    stop
+else (否)
+    :请求安全中心验证数字签名;
+    if (签名是否合法?) then (否)
+        :返回 401 Unauthorized;
+        stop
+    else (是)
+        :受信任请求转发至核心服务;
+    endif
+endif
+
+|核心服务|
+:解析业务参数并创建执行流水线;
+:返回执行任务标识 ExecID;
+
+|API 网关|
+:组装 200 OK 响应报文;
+:返回调用成功结果;
+
+|第三方系统|
+stop
+@enduml
+    \end{plantumlwide}
+    \caption{开放平台接口调用活动图}
+    \label{fig:openapi_seq}
+\end{figure}
+
+
+
+\subsection{系统核心模块组件图}
+
+为了更清晰地展示系统内部各组件之间的依赖与调用关系，我们设计了系统组件图，如图 \ref{fig:component_diag} 所示。
+
+\begin{figure}[H]
+    \centering
+    \begin{plantuml}
+@startuml
+skinparam componentStyle rectangle
+skinparam shadowing false
+skinparam defaultFontName "SimSun"
+
+package "核心业务编排层" {
+  [变更感知服务] as Sensor
+  [流水线编排引擎] as Orchestrator
+  [插件管理中心] as PluginMgr
+  [上下文管理器] as ContextMgr
+  
+  Sensor -> Orchestrator : 触发事件
+  Orchestrator -> PluginMgr : 加载插件
+  Orchestrator -> ContextMgr : 读写上下文
+}
+
+package "执行与调度层" {
+  [任务调度器] as Scheduler
+  [资源管理器] as ResMgr
+  [执行引擎] as Engine
+  [Runner 代理] as Runner
+  
+  Orchestrator -down-> Scheduler : 提交任务
+  Scheduler -> ResMgr : 申请资源
+  Scheduler -> Engine : 下发指令
+  Engine -> Runner : 远程执行
+}
+
+package "基础设施" {
+  [K8s API] as K8s
+  [Git 仓库] as Git
+  
+  Sensor -up-> Git : 监听 Webhook
+  ResMgr -down-> K8s : 创建 Pod
+}
+
+@enduml
+    \end{plantuml}
+    \caption{系统核心模块组件图}
+    \label{fig:component_diag}
+\end{figure}
+
+组件图展示了从变更监听到任务执行的完整调用链：变更感知服务捕获 Git 事件后，将其传递给编排引擎；编排引擎结合插件中心定义的逻辑生成任务，并提交给调度器；调度器向资源管理器申请 Kubernetes 资源后，由执行引擎驱动 Runner 完成实际构建。
+
+持续交付系统的核心业务是实现全生命周期的自动化管理。本节通过跨职能的泳道图对这一过程进行全局模型设计。
+
+如图 \ref{fig:swimlane_process} 所示，整个交付链条横跨了研发、变更感知、逻辑编排、算力执行及反馈触达五个核心环节。研发人员的代码提交动作触发了全自动流程的开启。系统在编排阶段引入了灵活的分支判断逻辑：首先进行准入合规性检查，若当前变动不符合安全基线或处于禁止变更期，流程将立刻熔断并提供反馈；若符合要求，则根据变更的特征维度动态渲染流水线任务图谱。随后，任务被分发并调度，在隔离的临时环境中顺序启动。最终，所有的构建工件、测试指标及执行日志被汇总生成质量报告。这种从感知、决策到执行、反馈的端到端闭环，是提升研发效能的核心手段。
+
+\begin{figure}[H]
+    \centering
+    \begin{plantuml}
+@startuml
+skinparam shadowing false
+skinparam defaultFontName "SimSun"
+
+|研发人员|
+start
+:提交代码/配置;
+
+|Git/配置中心|
+:触发 Webhook 事件;
+
+|编排中心|
+:接收并解析事件;
+:识别变更类型 (代码/SQL/配置);
+if (是否符合准入规则?) then (否)
+  :拦截并记录原因;
+  stop
+else (是)
+  :动态生成流水线 DAG;
+  :初始化执行上下文;
+endif
+
+|执行集群|
+:拉取执行镜像;
+:并行执行检查任务 (Unit Test/Lint);
+if (检查通过?) then (否)
+  :标记任务失败;
+else (是)
+  :执行构建与打包;
+  :部署至目标环境;
+endif
+:清理临时环境;
+
+|通知系统|
+:搜集执行日志与产物;
+:生成最终报告;
+:推送到 IM 群组;
+
+|研发人员|
+:查看结果反馈;
+stop
+@enduml
+    \end{plantuml}
+    \caption{持续交付核心业务流程泳道图}
+    \label{fig:swimlane_process}
+\end{figure}
+
+流程特别强调了“准入拦截”与“动态编排”两个环节。在进入消耗资源的执行阶段前，编排中心不仅会校验用户的权限，还会预判变更的合规性（如是否在封网期），从而避免无效的构建浪费资源。
+
+由于流水线执行是一个长周期的异步过程，为了准确描述任务在生命周期内不同阶段的转换与流转逻辑，系统引入了有限状态机模型进行管理，其流转关系如图 \ref{fig:state_machine} 所示。
+
+\begin{figure}[H]
+    \centering
+    \begin{plantuml}
+@startuml
+skinparam shadowing false
+skinparam defaultFontName "SimSun"
+
+[*] --> PENDING : 任务创建
+
+state PENDING {
+  [*] -> 队列等待
+  队列等待 -> 资源检测 : 调度器轮询
+}
+
+PENDING --> RUNNING : 资源分配成功
+PENDING --> REJECTED : 准入校验失败/队列超时
+
+state RUNNING {
+  [*] -> 拉取代码
+  拉取代码 -> 执行脚本
+  执行脚本 -> 产物上传
+}
+
+RUNNING --> SUCCESS : 所有步骤执行完毕
+RUNNING --> FAILED : 任意步骤报错
+RUNNING --> CANCELED : 用户手动取消
+
+FAILED --> PENDING : 触发重试
+
+SUCCESS --> [*]
+FAILED --> [*]
+CANCELED --> [*]
+REJECTED --> [*]
+@enduml
+    \end{plantuml}
+    \caption{流水线任务状态流转图}
+    \label{fig:state_machine}
+\end{figure}
+
+系统将任务状态严格划分为等待中、运行中、成功、失败、已取消及已拒绝六种核心状态。其中，处于失败状态的任务在符合重试策略的情况下，允许通过重试机制重新回归等待队列；而已取消与已拒绝则属于最终终止态，一旦进入此类状态，系统调配器会自动触发底层计算资源的回收与临时存储空间的挂载点卸载。这种严格的状态流转约束，确保了复杂并发场景下分布式任务执行的一致性与可追溯性。
+
+\section{关键算法模型设计}
+
+为了提升系统的易用性与执行效率，系统引入了推荐算法与自适应调度算法，辅助用户快速构建流水线并优化集群资源调度。
+
+\subsection{基于物品协同过滤的检查能力推荐算法}
+
+当用户基于现有模板构建新的交付链路时，系统需要从众多的原子检查能力中精准识别并推荐匹配的插件。考虑到不同领域的变更往往具备特定的技术栈倾向性，本系统设计并实现了基于物品的协同过滤推荐模型。
+
+该算法的执行逻辑涵盖了三个核心阶段：首先是共现矩阵的构建，系统定期分析全量历史流水线的配置拓扑，提取插件间的共现特征并生成共现矩阵，其中矩阵元素表示两个插件在同一交付链条中共同出现的频次权重；其次是相似度量化，系统采用改进的余弦相似度算法，结合各插件的使用热度对共现矩阵进行归一化处理，从而计算出插件间的关联紧密度；最后是实时推荐生成，当用户在编辑器中选定基础插件后，引擎会实时检索关联度最高的候选集合，并按相似度分值进行降序排列。这一机制显著降低了用户的配置负担，提升了流水线构建的标准化程度。
+
+推荐算法的执行逻辑流程如图 \ref{fig:algo_rec} 所示：
+
+\begin{figure}[H]
+    \centering
+    \begin{plantumlwide}
+@startuml
+skinparam shadowing false
+skinparam defaultFontName "SimSun"
+
+|用户|
+start
+:在编辑器中选定基础插件 (如 Maven构建);
+
+|流水线编辑器|
+:捕获变更事件并请求推荐能力;
+
+|推荐引擎|
+:提取当前插件特征标识;
+:检索历史共现矩阵数据库;
+:计算插件间的改进余弦相似度权重;
+:对候选插件集进行分值降序排列;
+:截取前 N 个关联度最高的插件;
+
+|流水线编辑器|
+:动态渲染推荐列表;
+
+|用户|
+:查看并按需选用"猜你需要"插件;
+stop
+@enduml
+    \end{plantumlwide}
+    \caption{基于协同过滤的插件推荐活动图}
+    \label{fig:algo_rec}
+\end{figure}
+
+\subsection{基于历史耗时的自适应调度算法}
+
+为了优化集群资源的利用率并减少平均交付延迟，任务调度器引入了基于历史执行画像的自适应调度策略。该策略旨在通过对任务耗时的智能预测，缓解长作业独占资源导致的队列饥饿问题。
+
+该算法的设计逻辑如下：首先，系统实时维护一份全量的执行画像库，记录每个插件在不同物理环境下的执行耗时分布；接着，进行调度优先级计算，针对等待队列中的每个任务，调度器不仅考虑其实际等待时长，还关联预测执行耗时，计算出综合优先级分值。这一分值模型兼顾了短作业优先的效率原则与公平性原则，确保了随着等待时间的增长，关键的长任务也能获得及时的调度资源。调度器会定期触发队列重排，根据资源池的实时剩余容量，按优先级分值从高到低依次进行任务下发。这一策略能够在保障高吞吐量的同时，有效提升研发人员对系统响应性能的感知评分。
+
+
+
+\section{数据库设计}
+
+数据库设计是系统稳定运行的基础。本系统主要采用关系型数据库 MySQL 存储核心业务数据，使用 Redis 存储临时缓存和队列数据。
+
+\subsection{数据库概念模型设计}
+
+系统的核心实体包括用户、项目、流水线定义、执行记录以及底层计算资源节点。这些实体共同构成系统运行的静态数据基石。实体间的关联关系如图 \ref{fig:er_diagram_extended} 所示。在设计中，用户与项目之间存在多对多的归属关系，每个项目下可创建多条不同用途的流水线，而流水线的每一次执行都会生成一份完整的执行记录。这种严密的实体关系设计，保障了数据在业务流转过程中的完整性与可追溯性。
+
+\begin{figure}[H]
+    \centering
+    \begin{plantumlwide}
+@startuml
+skinparam shadowing false
+skinparam defaultFontName "SimSun"
+
+' RBAC 实体
+entity "用户 (User)" as User {
+    *用户ID (PK)
+    --
+    账号, 密码
+    邮箱, 部门
+}
+
+entity "角色 (Role)" as Role {
+    *角色ID (PK)
+    --
+    角色名称
+    角色编码
+}
+
+entity "权限 (Permission)" as Permission {
+    *权限ID (PK)
+    --
+    资源类型
+    操作动作
+}
+
+' 流水线核心实体
+entity "项目 (Project)" as Project {
+    *项目ID (PK)
+    --
+    项目名称
+    仓库地址
+}
+
+entity "流水线 (Pipeline)" as Pipeline {
+    *流水线ID (PK)
+    --
+    名称
+    编排YAML
+}
+
+entity "阶段 (Stage)" as Stage {
+    *阶段ID (PK)
+    --
+    阶段名称
+    排序序号
+}
+
+entity "任务 (Job)" as Job {
+    *任务ID (PK)
+    --
+    任务名称
+    执行脚本/插件ID
+}
+
+' 执行与事件实体
+entity "执行记录 (Execution)" as Execution {
+    *执行ID (PK)
+    --
+    状态, 耗时
+    开始/结束时间
+}
+
+entity "事件记录 (Event)" as Event {
+    *事件ID (PK)
+    --
+    来源标识
+    载荷摘要
+}
+
+' 关联关系
+User ||--o{ Project : "属于"
+User }|--|{ Role : "赋予"
+Role }|--|{ Permission : "关联"
+
+Project ||--o{ Pipeline : "包含"
+Pipeline ||--o{ Stage : "拆分为"
+Stage ||--o{ Job : "包含"
+
+Pipeline ||--o{ Execution : "执行产生"
+Execution ||--o{ Event : "由事件触发"
+
+entity "插件 (Plugin)" as Plugin {
+    *插件ID (PK)
+    --
+    镜像地址
+    版本号
+}
+
+Job }o--|| Plugin : "调用"
+
+@enduml
+    \end{plantumlwide}
+    \caption{系统扩展实体关系图 (ER图)}
+    \label{fig:er_diagram_extended}
+\end{figure}
+
+\subsection{数据库逻辑结构设计}
+
+根据概念模型，核心数据表设计如下：
+
+根据上述概念模型，系统核心逻辑结构被转化为具体的数据表设计。为了确保在高并发读写下的一致性，核心业务表均采用 InnoDB 存储引擎。
+
+(1) 用户信息表（sys\_user）
+该表负责持久化存储用户的基本身份信息与安全凭据，是系统鉴权体系的底层支撑。
+
+\begin{table}[H]
+\centering
+\caption{用户信息表结构}
+\label{tab:user_table}
+\begin{tabular}{|l|l|l|l|}
+\hline
+\textbf{字段名} & \textbf{类型} & \textbf{说明} & \textbf{备注} \\ \hline
+user\_id & BIGINT & 用户标识 & 主键，自增 \\ \hline
+username & VARCHAR(64) & 登录账号 & 唯一索引 \\ \hline
+password & VARCHAR(128) & 认证密码 & 加密存储 \\ \hline
+email & VARCHAR(128) & 联系邮箱 & 用于通知触达 \\ \hline
+dept & VARCHAR(64) & 所属部门 & 用于资源分组 \\ \hline
+role & VARCHAR(32) & 角色身份 & 管理员/研发/运维 \\ \hline
+create\_time & DATETIME & 创建时间 & 自动生成 \\ \hline
+\end{tabular}
+\end{table}
+
+(2) 项目信息表（sys\_project）
+项目表作为业务管理的逻辑单元，维护了外部代码库或配置源与系统内部的映射关系。
+
+\begin{table}[H]
+\centering
+\caption{项目信息表结构}
+\label{tab:project_table}
+\begin{tabular}{|l|l|l|l|}
+\hline
+\textbf{字段名} & \textbf{类型} & \textbf{说明} & \textbf{备注} \\ \hline
+project\_id & BIGINT & 项目标识 & 主键，自增 \\ \hline
+project\_name & VARCHAR(128) & 项目名称 & 业务显示名 \\ \hline
+git\_repo\_url & VARCHAR(256) & 仓库地址 & 代码源连接串 \\ \hline
+owner\_id & BIGINT & 负责人 & 关联用户标识 \\ \hline
+description & VARCHAR(512) & 业务描述 & 可选备注 \\ \hline
+\end{tabular}
+\end{table}
+
+(3) 流水线执行记录表（pipeline\_execution）
+作为系统动态性最强的表，其记录了每一次交付逻辑的执行全轨迹，支持任务的回溯与统计。
+
+\begin{table}[H]
+\centering
+\caption{流水线执行记录表结构}
+\label{tab:execution_table}
+\begin{tabular}{|l|l|l|l|}
+\hline
+\textbf{字段名} & \textbf{类型} & \textbf{说明} & \textbf{备注} \\ \hline
+exec\_id & BIGINT & 执行标识 & 主键，自增 \\ \hline
+pipeline\_id & BIGINT & 流水线标识 & 外键关联 \\ \hline
+trigger\_source & VARCHAR(32) & 触发来源 & 仓库/手动/定时 \\ \hline
+status & VARCHAR(32) & 运行状态 & 等待/运行/终态 \\ \hline
+start\_time & DATETIME & 开始活跃时间 & \\ \hline
+end\_time & DATETIME & 结束销毁时间 & \\ \hline
+log\_path & VARCHAR(256) & 日志存储路径 & 分布式对象存储 \\ \hline
+\end{tabular}
+\end{table}
+
+(4) 角色权限相关表（sys\_role / sys\_permission）
+为了支撑 RBAC 模型，系统设计了角色表与权限表，以及中间关联表。
+
+\begin{table}[H]
+\centering
+\caption{角色信息表结构}
+\label{tab:role_table}
+\begin{tabular}{|l|l|l|l|}
+\hline
+\textbf{字段名} & \textbf{类型} & \textbf{说明} & \textbf{备注} \\ \hline
+role\_id & BIGINT & 角色标识 & 主键 \\ \hline
+role\_name & VARCHAR(64) & 角色名称 & 如“高级运维” \\ \hline
+role\_code & VARCHAR(64) & 角色编码 & 用于代码鉴权 \\ \hline
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{权限信息表结构}
+\label{tab:permission_table}
+\begin{tabular}{|l|l|l|l|}
+\hline
+\textbf{字段名} & \textbf{类型} & \textbf{说明} & \textbf{备注} \\ \hline
+perm\_id & BIGINT & 权限标识 & 主键 \\ \hline
+res\_type & VARCHAR(32) & 资源类型 & PIPELINE/PROJECT \\ \hline
+action & VARCHAR(32) & 操作动作 & READ/WRITE/EXEC \\ \hline
+\end{tabular}
+\end{table}
+
+(5) 流水线结构表（pipeline\_stage / pipeline\_job）
+流水线的 DAG 拓扑结构在物理上被拆分为阶段与任务进行存储。
+
+\begin{table}[H]
+\centering
+\caption{流水线阶段表结构}
+\label{tab:stage_table}
+\begin{tabular}{|l|l|l|l|}
+\hline
+\textbf{字段名} & \textbf{类型} & \textbf{说明} & \textbf{备注} \\ \hline
+stage\_id & BIGINT & 阶段标识 & 主键 \\ \hline
+pipeline\_id & BIGINT & 所属流水线 & 外键 \\ \hline
+stage\_name & VARCHAR(64) & 阶段名称 & 构建/部署等 \\ \hline
+order\_num & INT & 执行顺序 & 升序排列 \\ \hline
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{任务(Job)表结构}
+\label{tab:job_table}
+\begin{tabular}{|l|l|l|l|}
+\hline
+\textbf{字段名} & \textbf{类型} & \textbf{说明} & \textbf{备注} \\ \hline
+job\_id & BIGINT & 任务标识 & 主键 \\ \hline
+stage\_id & BIGINT & 所属阶段 & 外键 \\ \hline
+plugin\_id & BIGINT & 调用插件 & 关联插件中心 \\ \hline
+task\_script & TEXT & 自定义脚本 & 兼容模式 \\ \hline
+\end{tabular}
+\end{table}
+
+(6) 事件源与触发记录表（event\_source / event\_record）
+系统通过事件源定义多种监听规则，并通过记录表跟踪每一次外部触发的轨迹。
+
+\begin{table}[H]
+\centering
+\caption{事件触发记录表结构}
+\label{tab:event_table}
+\begin{tabular}{|l|l|l|l|}
+\hline
+\textbf{字段名} & \textbf{类型} & \textbf{说明} & \textbf{备注} \\ \hline
+event\_id & BIGINT & 事件标识 & 主键 \\ \hline
+source\_type & VARCHAR(32) & 来源类型 & GIT/DB/CRON \\ \hline
+payload & JSON & 原始报文内容 & 审计追踪 \\ \hline
+trace\_id & VARCHAR(64) & 全链路追踪ID & 用于日志关联 \\ \hline
+\end{tabular}
+\end{table}
+
+(7) 插件及资源配额表（plugin\_registry / res\_quota）
+插件表维护了系统可用的原子能力清单，配额表则控制了租户级别的资源水位上限。
+
+\begin{table}[H]
+\centering
+\caption{插件注册表结构}
+\label{tab:plugin_table}
+\begin{tabular}{|l|l|l|l|}
+\hline
+\textbf{字段名} & \textbf{类型} & \textbf{说明} & \textbf{备注} \\ \hline
+plugin\_id & BIGINT & 插件标识 & 主键 \\ \hline
+plugin\_name & VARCHAR(64) & 插件名称 & \\ \hline
+image\_url & VARCHAR(256) & 镜像地址 & 容器仓库路径 \\ \hline
+version & VARCHAR(32) & 版本号 & Semantic Version \\ \hline
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{计算资源配额表结构}
+\label{tab:quota_table}
+\begin{tabular}{|l|l|l|l|}
+\hline
+\textbf{字段名} & \textbf{类型} & \textbf{说明} & \textbf{备注} \\ \hline
+quota\_id & BIGINT & 配额标识 & 主键 \\ \hline
+tenant\_id & BIGINT & 关联租户/项目 & \\ \hline
+max\_cpu & INT & CPU核数上限 & 单位: Core \\ \hline
+max\_mem & INT & 内存容量上限 & 单位: GiB \\ \hline
+\end{tabular}
+\end{table}
+
+\section{接口设计}
+
+系统对内通过高效的 RPC 接口通信，对外通过标准的 RESTful API 提供服务。
+
+\subsection{外部接口设计}
+
+外部接口遵循 OpenAPI 3.0 规范，主要开放以下能力：
+
 \begin{itemize}
-    \item \textbf{高可用与自愈性 (High Availability)}：控制平面采用无状态副本部署，执行平面通过心跳租约机制确保任务在物理故障发生时的自动重试与迁移。
-    \item \textbf{极致可扩展性 (Scalability)}：计算资源（Runner）支持基于任务积压水位的弹性伸缩，功能模块通过插件化框架实现热拔插。
-    \item \textbf{严格的逻辑隔离 (Isolation)}：通过命名空间（Namespace）实现多租户间的资源与元数据物理隔离，各变更域（代码、配置、DB）执行环境完全独立。
-    \item \textbf{端到端的零信任安全 (Zero Trust Security)}：所有 API 调用均需经过身份挑战，敏感凭证在容器启动时动态注入且阅后即焚。
+    \item \texttt{POST /api/v1/trigger}：外部系统手动触发流水线。
+    \item \texttt{GET /api/v1/pipeline/{id}/status}：查询指定流水线的运行状态。
+    \item \texttt{GET /api/v1/report/{exec\_id}}：获取执行报告详情。
 \end{itemize}
 
-\subsection{逻辑分层架构}
+\subsection{内部接口设计}
 
-系统采用了典型的四层逻辑架构模型，自底向上分别为：
-\begin{enumerate}
-    \item \textbf{数据持久化层 (Data Layer)}：采用异构存储策略。MySQL 维护事务性元数据，Neo4j 存储跨域依赖图谱（MDDG），Prometheus 与 ELK 集成时序指标与海量日志。
-    \item \textbf{分布式执行层 (Execution Layer)}：基于容器技术构建的弹性计算平面。Runner 节点负责具体检查插件与部署逻辑的落地，确保环境的一致性。
-    \item \textbf{智能化编排层 (Orchestration Layer)}：系统的“大脑”。负责解析发布蓝图，动态生成有向无环图（DAG），并执行基于风险评分的门禁控制。
-    \item \textbf{接入与控制层 (Gateway Layer)}：提供统一的 OpenAPI 与 UI 门户。负责异步信号的接入、协议转换、身份鉴权以及全局流量调度。
-\end{enumerate}
-
-\subsection{核心模块职能划分}
-
-基于第三章的五大功能模块要求，系统内部职能被精确定位为五个协同工作的子系统：触发感知子系统（感知变化）、插件检查子系统（质量门禁）、编排中心（逻辑调度）、反馈监控子系统（实时闭环）及管理子系统（基础维护）。这种高内聚低耦合的设计确保了系统能够高效响应复杂变更信号。
-
-\section{核心子系统详细架构设计}
-
-\subsection{触发感知子系统}
-感知子系统作为系统的“传感器”，其内部包含高性能 Webhook 适配器阵列与语义识别引擎。它通过订阅异构数据源（Git, Apollo, Nacos 等）的事件流，利用正则表达式与抽象语法树（AST）扫描技术，将非标注的推流信号转化为系统内部统一的“变更原子”描述符，并利用消息队列（MQ）缓解并发压力。
-
-\subsection{插件化检查子系统}
-为支撑灵活的检查能力，该子系统采用了 Sidecar 容器隔离模式。每个检查算子（如单元测试、Sonar 扫描、SQL 审计）均封装在独立的镜像中。子系统负责算子的版本管理、动态加载及运行时的 CPU/Memory 资源限制，确保第三方插件的故障不会传染给主执行链路。
-
-\subsection{智能化编排中心设计}
-编排中心负责将用户的交付意图转化为物理执行路径。它集成了 DAG 动态解析逻辑，能够根据 MDDG 计算出的隐含依赖自动补全任务节点。例如，当检测到代码变更依赖于特定的 DDL 脚本时，编排中心会自动在发布任务前置处插入数据库变更验证节点。
-
-\subsection{全链路反馈与监控看板设计}
-反馈中心实现了信息的“情景化推送”。它通过全量采集 Runner 节点的执行 Trace 数据，并实时拉取生产环境的业务监控指标（QPS/RT），构建基于 DORA 模型的效能仪表盘。其自诊断功能可为失败的流水线自动关联历史知识库，提供修复建议。
-
-\subsection{统一身份认证与权限管理子系统}
-子系统构建了基于 RBAC（角色权限控制）与 ABAC（属性权限控制）的级联鉴权框架。除对接企业 LDAP 统一身份外，还实现了基于时间窗口、风险等级的动态权限下发。例如，在“锁定期间”可以禁止所有非紧急变更的发布权限。
-
-\section{数据持久化设计}
-
-\subsection{关系型数据模型 (MySQL)}
-MySQL 存储系统的“静态事实”。核心表包括：
-\begin{itemize}
-    \item \texttt{change\textunderscore records}：存储全局唯一的变更任务状态与风险评分。
-    \item \texttt{pipeline\textunderscore snapshots}：保存 DAG 的序列化定义与配置快照。
-    \item \texttt{atomic\textunderscore tasks}：记录每一个原子步骤的执行参数、输出及 Runner 分配详情。
-\end{itemize}
-
-\subsection{拓扑依赖存储模型 (Neo4j)}
-针对 MDDG 构建，我们在 Neo4j 中设计了如下实体与关系：
-\begin{itemize}
-    \item \textbf{节点类型}：\texttt{Service}（微服务）、\texttt{Database}（库/表实体）、\texttt{ConfigKey}（配置项）。
-    \item \textbf{关系类型}：\texttt{[:DEPEND\textunderscore ON]}（调用依赖）、\texttt{[:RELY\textunderscore BY]}（配置引用）、\texttt{[:ACCESS\textunderscore TO]}（数据读写关系）。
-\end{itemize}
-
-\subsection{监控指标与日志存储}
-时序指标存储于 Prometheus 联邦中，重点关注流水线端到端耗时（Cycle Time）与变更失败率。全量执行日志通过 Fluentd 采集并索引至 Elasticsearch，支持按 \texttt{trace\textunderscore id} 进行秒级溯源。
-
-\section{关键算法逻辑建模}
-
-\subsection{多维度依赖图 (MDDG) 构建算法}
-MDDG 算法通过聚合静态代码扫描结果与动态链路追踪数据，实时拟合系统全貌。算法定义：给定顶点集 $V=\{v_{\text{svc}}, v_{\text{cfg}}, v_{\text{db}}\}$ 与连接权重函数 $\omega(e)$，旨在构建反映系统“耦合真相”的有向加权图。
-
-\subsection{基于权重衰减的影响分析算法 (WD-Pruning BFS)}
-为降低计算复杂度，我们采用了带剪枝的广度优先搜索策略。
-算法步骤：
-1. 从变更源节点出发进行多层扩散；
-2. 每一层传播时，风险值按 $\omega(e)$ 进行衰减；
-3. 当风险分低于预设阈值 $\epsilon$ 时进行剪枝丢弃，从而在海量拓扑中快速定位核心受灾区。
-
-\subsection{分布式分层风险评分算法}
-风险分 $\text{Score} = \sum (\text{Entropy} \times \text{Weight})$。该算法引入信息熵权法，综合评估变更的文本 Diff 量、波及节点的影响度（Centrality）以及历史发布的成功率基线，输出 0-100 的客观风险评分，为自动化门禁提供决策输入。
+内部微服务之间主要通过 gRPC 进行通信，以降低网络延迟。例如，编排引擎调用资源管理器的 \texttt{AllocateResource} 接口申请计算节点，调用执行引擎的 \texttt{ExecuteTask} 接口下发任务指令。
 
 \section{本章小结}
 
-本章针对系统的软硬件逻辑架构、核心模块设计、数据模型及关键算法提供了详尽的概要设计说明。通过分层架构解决了复杂场景下的高伸缩性需求，通过异构数据模型兼顾了事务性与拓扑检索效率。本章所定义的架构蓝图与数学模型，不仅严格落实了前述的需求调研，更为后续章节中系统的详细实现与实验评估奠定了坚实的理论与工程基石。
+本章详细阐述了面向多变更领域的持续交付系统的概要设计蓝图。首先确立了系统层次架构与物理拓扑结构，为平台的平稳运行搭建了稳固的骨架；随后，对用户治理、变更感知、智能编排、算力执行、反馈观测及开放平台等核心子系统进行了深度建模，通过引入设计模式与状态机逻辑，确保了系统对复杂交付场景的支撑能力。最后，给出了支撑系统运行的数据模型与接口规范。本章所确立的概要设计内容详实、逻辑闭环，为后续各功能模块的详细实现与系统集成提供了明确的指导依据。

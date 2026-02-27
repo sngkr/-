@@ -1,0 +1,60 @@
+@startuml
+title "Multi-Change Domain Continuous Delivery System Topology"
+!theme materia-dark
+skinparam backgroundColor #2D2D2D
+
+node "Control Plane Hub (治理中枢-中心VPC)" as ControlNode #37474F {
+    component "High-Availability Gateway" as CAG
+    component "Master Orchestrator" as MO
+    
+    database "State & Metadata Clusters" {
+        [MySQL (MGR Cluster)] as MasterDB
+        [Neo4j (Graph Cluster)] as GraphDB
+        [Prometheus (Metrics)] as MetricsDB
+        [Redis (Task Queue)] as Queue
+    }
+}
+
+node "Domain: Code (开发域)" as CodeRegion #607D8B {
+    [GitLab Cluster] as GitLab
+    [Code Webhook Relay] as Relay
+}
+
+folder "Distributed Execution Clusters (边缘执行区)" {
+    node "Region A (East China)" #263238 {
+        component "Runner Pool (VPC-01)" as Runner1
+        [Production App Cluster] as Prod1
+    }
+    
+    node "Region B (North China)" #263238 {
+        component "Runner Pool (VPC-02)" as Runner2
+        [Configuration Center] <<Nacos/Apollo>> as ConfigCenter
+    }
+}
+
+node "Cloud Infrastructure APIs" as InfraCloud #455A64 {
+    [K8s API Server] as K8s
+    [Terraform Cloud] as TF
+    [Aliyun/AWS Resources] as CloudRes
+}
+
+' Relationships
+GitLab -right-> Relay : PUSH Event
+Relay -down-> CAG : UED Signal
+CAG -down-> MO : Orchestrate
+
+MO -left-> Queue : enqueue
+MO -down-> Runner1 : dispatch (gRPC)
+MO -down-> Runner2 : dispatch (gRPC)
+
+Runner1 -down-> Prod1 : Rolling Update
+Runner2 -down-> ConfigCenter : Config Injection
+Runner2 -right-> MasterDB : Execution Log
+
+Runner1 -right-> K8s : IaC Apply
+Runner1 -right-> TF : Resource Manage
+TF -down-> CloudRes 
+
+MO -left-> GraphDB : Query MDDG
+MO -left-> MasterDB : Fetch Pipeline Def
+@enduml
